@@ -1,0 +1,474 @@
+
+
+```{r libraries}
+library(Seurat)
+library(SeuratObject)
+library(scales)
+library(tidyverse)
+library(sctransform)
+library(RColorBrewer)
+library(ggpubr)
+library(colorspace)
+```
+
+##### Define names and paths
+```{r paths}
+dataset.name = "ALL.DF."
+rawdatapath = "/path to raw file"
+metadatapath = "/path to meta data"
+plotspath = paste0("/path to plots")
+Rfilespath = "/path to DF"
+doubletspath = "/path to duplates"
+setwd("/path to working directory")
+mitoTH = 20
+UMITH = 35000
+```
+
+##### Load the DF
+```{r}
+RBCpresentRBCplus <- Read10X(data.dir = rawdatapath)
+```
+
+##### Initialize the Seurat object
+```{r}
+RBCpresentRBCplusSeu <- CreateSeuratObject(counts = RBCpresentRBCplus,
+                                           project = "pdr10X",
+                                           min.cells = 3,
+                                           min.features = 200,
+                                           names.delim = "-",
+                                           names.field = 2)
+RBCpresentRBCplusSeu
+rm(RBCpresentRBCplus)
+table(RBCpresentRBCplusSeu@meta.data$orig.ident)
+```
+
+##### Add the patient clinical data
+```{r}
+Patient_metadata <- read.csv(paste0(metadatapath, "/Patient_metadata_coded.csv"), sep = ";", stringsAsFactors = FALSE,dec = ",")
+names(Patient_metadata)[names(Patient_metadata) == "Patient_N"] <- "orig.ident"
+Patient_metadata$orig.ident <- as.factor(Patient_metadata$orig.ident)
+levels(Patient_metadata$orig.ident)
+str(Patient_metadata)
+metadata <- RBCpresentRBCplusSeu@meta.data
+metadata$barcodes <- rownames(metadata)
+str(metadata)
+levels(metadata$orig.ident)
+levels(Patient_metadata$orig.ident)
+
+metadatatoadd <- dplyr::left_join(x = metadata, y = Patient_metadata, by = "orig.ident")
+colnames(metadatatoadd)
+rownames(metadatatoadd) <- metadatatoadd$barcodes
+
+str(metadatatoadd)
+Factor_columns <- c("Patient_ID", "orig.ident","Gender","Diabetes.Type","Hypertension","Smoking")
+metadatatoadd[Factor_columns] <- lapply(metadatatoadd[Factor_columns], as.factor)  ## as.factor() could also be used
+RBCpresentRBCplusSeu <- AddMetaData(RBCpresentRBCplusSeu,metadata = metadatatoadd) #add the metadata
+```
+
+##### Add patient colour palette to metadata
+```{r}
+PalettePatients = c("#006ba4","#ff800e","#ababab","#595959","#5f9ed1","#898989","#a2c8ec","#c85200","#ffbc79","#cfcfcf")
+show_col(PalettePatients)
+
+PatientLabels = data.frame("orig.ident" = c("1","2","3","4","5","6","7","8","9","10"),
+                           "Colour_Patient" = PalettePatients, stringsAsFactors = FALSE)
+str(PatientLabels)
+show_col(PatientLabels$Colour_Patient)
+metadata <- RBCpresentRBCplusSeu@meta.data
+metadata$barcodes <- rownames(metadata)
+metadatatoadd <- dplyr::left_join(x = metadata, y = PatientLabels, by = "orig.ident")
+colnames(metadatatoadd)
+rownames(metadatatoadd) <- metadatatoadd$barcodes
+RBCpresentRBCplusSeu <- AddMetaData(RBCpresentRBCplusSeu,metadata = metadatatoadd["Colour_Patient"])
+colnames(RBCpresentRBCplusSeu@meta.data)
+str(RBCpresentRBCplusSeu@meta.data)
+show_col(unique(RBCpresentRBCplusSeu@meta.data$Colour_Patient))
+```
+
+##### Reorder factors in the Seurat Object
+```{r}
+RBCpresentRBCplusSeu@meta.data$orig.ident <- factor(RBCpresentRBCplusSeu@meta.data$orig.ident, levels = c("1", "2", "3","4", "5", "6", "7",  "8", "9", "10"))
+
+RBCpresentRBCplusSeu@meta.data$CME <- factor(RBCpresentRBCplusSeu@meta.data$CME, levels = c("No CME", "CME"))
+
+RBCpresentRBCplusSeu@meta.data$Preoperative.laser <- factor(RBCpresentRBCplusSeu@meta.data$Preoperative.laser, levels = c(""))
+
+RBCpresentRBCplusSeu@meta.data$PreVEGF <- factor(RBCpresentRBCplusSeu@meta.data$PreVEGF, levels = c("Untreated", "Treated"))
+
+RBCpresentRBCplusSeu@meta.data$Statin.Therapy <- factor(RBCpresentRBCplusSeu@meta.data$Statin.Therapy, levels = c("Untreated", "Treated"))
+
+```
+
+##### PROCESSING MITOCHONDRIAL GENES
+```{r}
+RBCpresentRBCplusSeu[["percent.mt"]] <- PercentageFeatureSet(object = RBCpresentRBCplusSeu, pattern = "^MT-")
+mt.genes <- rownames(RBCpresentRBCplusSeu)[grep("^MT-",rownames(RBCpresentRBCplusSeu))] # to extract the names of the mitochondrial genes
+```
+
+##### PROCESSING RIBOSOMAL GENES
+```{r}
+RBCpresentRBCplusSeu[["percent.ribo"]] <- PercentageFeatureSet(object = RBCpresentRBCplusSeu, pattern = "^RP[SL]") # this gives 178 genes - correct
+ribo.genes <- rownames(RBCpresentRBCplusSeu)[grep("^RP[SL]",rownames(RBCpresentRBCplusSeu))] # to extract the names of the ribosomal genes
+```
+
+##### PROCESSING Mitochondrial filtering with Seurat
+```{r}
+selected.mt <- WhichCells(RBCpresentRBCplusSeu, expression = percent.mt < mitoTH)
+length(selected.mt)
+RBCpresentRBCplusSeu_filt <- subset(RBCpresentRBCplusSeu, cells = selected.mt)
+RBCpresentRBCplusSeu_filt
+table(RBCpresentRBCplusSeu_filt@meta.data$orig.ident)
+```
+
+##### PROCESSING UMI filtering with Seurat
+```{r}
+selected.UMI <- WhichCells(RBCpresentRBCplusSeu_filt, expression = nCount_RNA < UMITH)
+length(selected.UMI)
+RBCpresentRBCplusSeu_filt <- subset(RBCpresentRBCplusSeu_filt, cells = selected.UMI)
+RBCpresentRBCplusSeu_filt
+table(RBCpresentRBCplusSeu_filt@meta.data$orig.ident)
+```
+
+##### PROCESSING removing Doublets #####
+```{r}
+Pat1.RBC.present <- readRDS(paste0(doubletspath, "/Pat1.doublets.RBCpresent.rds"))
+Pat2.RBC.present <- readRDS(paste0(doubletspath, "/Pat2.doublets.RBCpresent.rds"))
+Pat3.RBC.present <- readRDS(paste0(doubletspath, "/Pat3.doublets.RBCpresent.rds"))
+Pat4.RBC.present <- readRDS(paste0(doubletspath, "/Pat4.doublets.RBCpresent.rds"))
+Pat5.RBC.present <- readRDS(paste0(doubletspath, "/Pat5.doublets.RBCpresent.rds"))
+Pat6.RBC.present <- readRDS(paste0(doubletspath, "/Pat6.doublets.RBCpresent.rds"))
+Pat7.RBC.present <- readRDS(paste0(doubletspath, "/Pat7.doublets.RBCpresent.rds"))
+Pat8.RBC.present <- readRDS(paste0(doubletspath, "/Pat8.doublets.RBCpresent.rds"))
+Pat9.RBC.present <- readRDS(paste0(doubletspath, "/Pat9.doublets.RBCpresent.rds"))
+Pat10.RBC.present <- readRDS(paste0(doubletspath, "/Pat10.doublets.RBCpresent.rds"))
+
+Pat1.RBC.removed <- readRDS(paste0(doubletspath, "/Pat1.doublets.RBCremoved.rds"))
+Pat2.RBC.removed <- readRDS(paste0(doubletspath, "/Pat2.doublets.RBCremoved.rds"))
+Pat3.RBC.removed <- readRDS(paste0(doubletspath, "/Pat3.doublets.RBCremoved.rds"))
+Pat4.RBC.removed <- readRDS(paste0(doubletspath, "/Pat4.doublets.RBCremoved.rds"))
+Pat5.RBC.removed <- readRDS(paste0(doubletspath, "/Pat5.doublets.RBCremoved.rds"))
+Pat6.RBC.removed <- readRDS(paste0(doubletspath, "/Pat6.doublets.RBCremoved.rds"))
+Pat7.RBC.removed <- readRDS(paste0(doubletspath, "/Pat7.doublets.RBCremoved.rds"))
+Pat8.RBC.removed <- readRDS(paste0(doubletspath, "/Pat8.doublets.RBCremoved.rds"))
+Pat9.RBC.removed <- readRDS(paste0(doubletspath, "/Pat9.doublets.RBCremoved.rds"))
+Pat10.RBC.removed <- readRDS(paste0(doubletspath, "/Pat10.doublets.RBCremoved.rds"))
+
+Joint.Doublets = unique(c(Pat1.RBC.present,Pat2.RBC.present,Pat3.RBC.present,Pat4.RBC.present,Pat5.RBC.present,
+                          Pat6.RBC.present,Pat7.RBC.present,Pat8.RBC.present,Pat9.RBC.present,Pat10.RBC.present,
+                          Pat1.RBC.removed,Pat2.RBC.removed,Pat3.RBC.removed,Pat4.RBC.removed,Pat5.RBC.removed,
+                          Pat6.RBC.removed,Pat7.RBC.removed,Pat8.RBC.removed,Pat9.RBC.removed,Pat10.RBC.removed)) #530
+selected.Doublets <- WhichCells(RBCpresentRBCplusSeu_filt, cells = Joint.Doublets, invert = TRUE)
+length(selected.Doublets)
+RBCpresentRBCplusSeu_filt <- subset(RBCpresentRBCplusSeu_filt, cells = selected.Doublets)
+RBCpresentRBCplusSeu_filt
+table(RBCpresentRBCplusSeu_filt@meta.data$orig.ident)
+rm(RBCpresentRBCplusSeu)
+```
+
+# Median gene per cell and UMI per cell
+```{r}
+geneUMI = FetchData(object = RBCpresentRBCplusSeu_filt, vars = c("orig.ident", "nFeature_RNA", "nCount_RNA"))
+geneUMI = geneUMI %>% 
+  dplyr::group_by(orig.ident) %>% 
+  dplyr::summarise_all(median) %>% 
+  dplyr::mutate_if(is.double, as.integer)
+write.csv(x = geneUMI, file = paste0(plotspath, "/", dataset.name, "metrics_per_patient.csv"))
+
+geneUMI = FetchData(object = RBCpresentRBCplusSeu_filt, vars = c("nFeature_RNA", "nCount_RNA"))
+geneUMI = geneUMI %>% 
+  summarise_all(c(mean, min, max))
+write.csv(x = geneUMI,file = paste0(plotspath, "/", dataset.name, "metrics_all.csv"))
+```
+
+##### PROCESSING CELL CYCLE GENES - POST FILTERING
+```{r}
+RBCpresentRBCplusSeu_filt <- CellCycleScoring(object = RBCpresentRBCplusSeu_filt,
+                                         g2m.features = cc.genes.updated.2019$g2m.genes,
+                                         s.features = cc.genes.updated.2019$s.genes)
+RBCpresentRBCplusSeu_filt@meta.data$Phase = as.factor(RBCpresentRBCplusSeu_filt@meta.data$Phase)
+```
+
+##### PROCESSING - Calculate cell cycle difference
+```{r}
+RBCpresentRBCplusSeu_filt$CC.Difference <- RBCpresentRBCplusSeu_filt$S.Score - RBCpresentRBCplusSeu_filt$G2M.Score
+```
+
+##### PROCESSING - SCT for normalization, finding variable features and scaling
+```{r}
+RBCpresentRBCplusSeu_filtNoCC <- SCTransform(object = RBCpresentRBCplusSeu_filt,
+                                        vars.to.regress = c("nCount_RNA", "CC.Difference", "percent.mt", "percent.ribo"),
+                                        return.only.var.genes = FALSE,
+                                        min_cells = 1, 
+                                        method = "glmGamPoi")
+rm(RBCpresentRBCplusSeu_filt)
+```
+
+##### Perform linear dimensional reduction
+```{r}
+RBCpresentRBCplusSeu_filtNoCCYesPCA <- RunPCA(object = RBCpresentRBCplusSeu_filtNoCC)
+rm(RBCpresentRBCplusSeu_filtNoCC)
+ALL.DF = RBCpresentRBCplusSeu_filtNoCCYesPCA
+rm(RBCpresentRBCplusSeu_filtNoCCYesPCA)
+VizDimLoadings(ALL.DF, dims = 1:2, reduction = "pca")
+VariableFeaturePlot(ALL.DF)
+top20NoRBC <- head(VariableFeatures(ALL.DF), 20)
+plot1NoRBC <- VariableFeaturePlot(ALL.DF)
+plot2NoRBC <- LabelPoints(plot = plot1NoRBC, points = top20NoRBC, repel = TRUE, xnudge = 0, ynudge = 0, max.overlaps = 20)
+ggsave(plot = plot2NoRBC, paste0(dataset.name, "HVG.pdf"),device = cairo_pdf, width = 240, height = 180, units = "mm", 
+       path = plotspath)
+```
+
+### Check cell-cycle genes
+```{r}
+## get PCA loadings
+loadings <- as.data.frame(ALL.DF@reductions$pca@feature.loadings ) # with RunPCA with no RBC
+# cc genes present in data
+cc.genes.present <- rownames(loadings[rownames(loadings) %in% unlist(cc.genes.updated.2019),] ) # with RunPCA with no RBC
+# put rownames to gene column
+loadings$gene <- rownames(loadings)
+# TRUE if a CC marker is present in the loadings
+loadings$CC.genes <- loadings$gene %in% cc.genes.present
+loadings[which(loadings$CC.genes == TRUE),'CC.genes.name'] <- loadings[which(loadings$CC.genes == TRUE),'gene']
+loadings$CC.genes.name
+# Plot a component to see the CC genes
+ggplot(loadings, aes(x=PC_1,y=gene, color=CC.genes) ) + 
+  geom_point(alpha=0.5)+geom_label(aes(label=CC.genes.name))+
+  theme(axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+# Take only 30 PCs
+lod.rnk <- loadings[,c(1:30)]
+lod.rnk$gene = rownames(lod.rnk) 
+lod.rnk <- lod.rnk[,1:30]
+# Check the rank of CC genes in each PCs
+dir <- "pos"
+df = apply(lod.rnk, 2, FUN=function(x){
+  
+  if(dir == "pos"){
+    pos <- x[x>=0]
+    pos <- pos[order(pos, decreasing = TRUE)]
+    which( names(pos) %in% cc.genes.present )
+  }else{
+    neg <- x[x<0]
+    neg <- neg[order(neg)]
+    which( names(neg) %in% cc.genes.present )}}) 
+df = plyr::ldply(df, rbind)
+write.csv(x = df,file = paste0(plotspath, "/", dataset.name, "PC_ranking_CCgenes.csv") )
+# Cell cycle genes are ranking high!
+```
+
+##### Determine the 'dimensionality' of the ALL.DF
+```{r}
+ElbowPlot(object = ALL.DF, ndims = 50)
+```
+
+##### Select how many PCs
+```{r}
+# Determine percent of variation associated with each PC
+pct = data.frame("PC" = colnames(ALL.DF@reductions$pca),
+                 "rank" = c(1:50),
+                 "percent.stdev" = ALL.DF@reductions$pca@stdev / sum(ALL.DF@reductions$pca@stdev) * 100)
+
+# Calculate cumulative percents for each PC
+pct$cumu <- cumsum(pct$percent.stdev)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+PC_criteria1 = pct[pct$cumu > 90 & pct$percent.stdev < 5, "rank"][1]
+PC_criteria1
+
+# Determine the difference between variation of PC and subsequent PC
+str(pct)
+PC_criteria2 = pct %>% 
+  mutate(diff_stdev = percent.stdev - lag(percent.stdev)) %>% 
+  arrange(diff_stdev) %>% 
+  filter(abs(diff_stdev) > 0.1) %>% 
+  arrange(-rank)
+PC_criteria2 = PC_criteria2[1, "rank"]
+
+# Minimum of the two calculation
+pcs <- min(PC_criteria1, PC_criteria2)
+
+pcs
+
+# Elbow plot to visualize 
+Elbow = ggplot(pct, aes(cumu, percent.stdev, label = rank, color = rank > pcs)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct$percent.stdev[pct$percent.stdev > 5]), color = "grey") +
+  theme_bw()
+
+ggsave(plot = Elbow, paste0(dataset.name, "ElbowPlot.QuantitativeApproach", ".pdf"),device = cairo_pdf, width = 240, height = 180, units = "mm", 
+       path = plotspath)
+```
+
+##### Cluster the cells
+```{r}
+ALL.DF <- FindNeighbors(object = ALL.DF, dims = 1:pcs)
+ALL.DF <- FindClusters(object = ALL.DF, resolution = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0))
+
+# Clusters vs resolution
+clustersRBCplus <- sapply(grep("^SCT_snn_res",colnames(ALL.DF@meta.data),value = TRUE),
+                           function(x) length(unique(ALL.DF@meta.data[,x])))
+clustersRBCplus
+``` 
+
+##### UMAP
+```{r}
+set.seed(1234)
+ALL.DF <- RunUMAP(object = ALL.DF, dims = 1:pcs, n.components = 2)
+```
+
+##### TSNE
+```{r}
+set.seed(1234)
+ALL.DF <- RunTSNE(object = ALL.DF, reduction = "pca", dims = 1:pcs, dim.embed = 2)
+```
+
+##### Define clusters
+```{r}
+df_names <- ALL.DF@meta.data[c("SCT_snn_res.0.2", "SCT_snn_res.0.3")]
+df_names$ClusterName <- NA
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 0] <- "T_NK"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 1] <- "PC_SMC"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 2] <- "EC"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 3] <- "MO_MP_MiG"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 4] <- "EC"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 5] <- "EC"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 6] <- "FB"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 7] <- "MüG"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 8] <- "B"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 9] <- "PC_SMC"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 10] <- "MC"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 11] <- "NP"
+df_names$ClusterName[df_names$SCT_snn_res.0.2 == 12] <- "Plasma"
+unique(df_names$ClusterName)
+metadata <- as.data.frame(df_names["ClusterName"])
+ALL.DF <- AddMetaData(ALL.DF,metadata = metadata,col.name = "ClusterNames")
+unique(ALL.DF@meta.data$ClusterNames)
+```
+
+##### Add Cluster colours to metadata #####
+```{r}
+metadata <- ALL.DF@meta.data
+metadata$barcodes <- rownames(metadata)
+levels(metadata$ClusterNames)
+metadata <- metadata[,c("ClusterNames", "barcodes")]
+metadatatoadd <- dplyr::left_join(x = ALL.DF.CellLabels[,c("ClusterNames", "ClusterNamesColours")], y = metadata, by = "ClusterNames")
+
+rownames(metadatatoadd) <- metadatatoadd$barcodes
+str(metadatatoadd)
+show_col(unique(metadatatoadd$ClusterNamesColours))
+metadatatoadd <- metadatatoadd["ClusterNamesColours"]
+ALL.DF <- AddMetaData(ALL.DF,metadata = metadatatoadd)
+show_col(unique(as.character(ALL.DF$ClusterNamesColours)))
+```
+
+##### Save the R object! #####
+
+```{r}
+saveRDS(ALL.DF, file = paste0(Rfilespath, "/", dataset.name, "rds"))
+```
+##### END ####
+
+```
+
+##### Save the R object! #####
+```{r}
+saveRDS(ALL.DF, file = paste0(Rfilespath, "/", dataset.name, "rds"))
+```
+```
+
+##### Define clusters for CellChat
+```{r}
+dataset.name = "ALL.DF.subset."
+EC.clusters = EC.DF@meta.data["ClusterNames"]
+PC.clusters = PC.SMC.FB.DF@meta.data["ClusterNames"]
+L.clusters = Lymphoid.DF.subset@meta.data["ClusterNames"]
+M.clusters = Myeloid.DF.subset@meta.data["ClusterNames"]
+Mug.clusters = ALL.DF.subset@meta.data["ClusterNames"]
+Mug.clusters$Cell = rownames(Mug.clusters)
+Mug.clusters = Mug.clusters[Mug.clusters$ClusterNames == "MüG",]
+Mug.clusters = Mug.clusters["ClusterNames"]
+
+sum(nrow(EC.clusters), nrow(PC.clusters),nrow(L.clusters), nrow(M.clusters), nrow(Mug.clusters))
+
+Joint = bind_rows(EC.clusters, PC.clusters, L.clusters, M.clusters, Mug.clusters)
+unique(Joint$ClusterNames)
+levels(Joint$ClusterNames)
+ALL.DF.subset <- AddMetaData(ALL.DF.subset, metadata = Joint, col.name = "ClusterNamesJoint")
+unique(levels(ALL.DF.subset@meta.data$ClusterNamesJoint))
+unique(ALL.DF.subset@meta.data$ClusterNamesJoint)
+```
+
+##### Reorder factors in the Seurat Object
+```{r}
+ALL.DF.subset@meta.data$ClusterNamesJoint <- factor(ALL.DF.subset@meta.data$ClusterNamesJoint,
+                                             levels = c("Damaged_EC","Stressed_EC","PLCG2hi_EC","FABP5hi_EC","Immune_EC","EndMT_EC","Venous_EC","Tip_EC",
+                                                        "Damaged_PC","GRPhigh_PC","MMP9high_PC","Prolif._PC","PLNhigh_SMC","ACANhigh_SMC","RGS5high_SMC","MyoFB","FB",
+                                                        "MüG",
+                                                        "CD4.naive","CD4.TRM","Th1","Treg","CD8.TRM","CD8.MT","CD8.CTL","GD","Prolif.T","NKT","NK","B","Plasma",
+                                                        "Preactiv.MG","Preactiv.MG.IFNG","Activ.MG","AntiInfl.MG","TAGLN.MP","M1.MP","Periv.MP","MC","NP","cDC2"))
+ALL.DF.subset@meta.data$ClusterNamesJoint
+unique(levels(ALL.DF.subset@meta.data$ClusterNamesJoint))
+unique(ALL.DF.subset@meta.data$ClusterNamesJoint)
+```
+
+##### Remove filtered cell clusters
+```{r}
+Idents(object = ALL.DF.subset) <- "ClusterNamesJoint" 
+levels(ALL.DF.subset)
+
+ALL.DF.subset <- subset(ALL.DF, cells = rownames(ALL.DF@meta.data[!ALL.DF@meta.data$ClusterNamesJoint %in% c("RBC", "MSC.like", "EC.MG"),]))
+
+ALL.DF.subset$ClusterNamesJoint = droplevels(ALL.DF.subset$ClusterNamesJoint)
+
+levels(ALL.DF.subset@meta.data$ClusterNamesJoint)
+```
+
+##### Add Cluster colours to metadata #####
+```{r}
+metadata <- ALL.DF.subset@meta.data
+metadata$barcodes <- rownames(metadata)
+levels(metadata$ClusterNamesJoint)
+metadata <- metadata[,c("ClusterNamesJoint", "barcodes")]
+metadatatoadd <- dplyr::left_join(x = ALL.DF.subset.CellLabelsJoint[,c("ClusterNamesJoint", "ClusterNamesJointColours")], y = metadata, by = "ClusterNamesJoint")
+
+rownames(metadatatoadd) <- metadatatoadd$barcodes
+str(metadatatoadd)
+show_col(unique(metadatatoadd$ClusterNamesJointColours))
+metadatatoadd <- metadatatoadd["ClusterNamesJointColours"]
+ALL.DF.subset <- AddMetaData(ALL.DF.subset,metadata = metadatatoadd)
+show_col(unique(as.character(ALL.DF.subset$ClusterNamesJointColours)))
+```
+
+##### Save the R object! #####
+```{r}
+saveRDS(ALL.DF.subset, file = paste0(Rfilespath, "/", dataset.name, "rds"))
+```
+
+
+
+
+
+
+##### Rename the MO/MP/MiG cluster
+```{r}
+unique(ALL.DF@meta.data$ClusterNames)
+levels(ALL.DF@meta.data$ClusterNames)
+ALL.DF@meta.data$ClusterNames = factor(ALL.DF@meta.data$ClusterNames,
+                                       levels = c(levels(ALL.DF@meta.data$ClusterNames), "MP_MG"))
+
+ALL.DF@meta.data[ALL.DF@meta.data$ClusterNames == "MO_MP_MiG","ClusterNames"] = "MP_MG"
+ALL.DF@meta.data$ClusterNames = droplevels(ALL.DF@meta.data$ClusterNames)
+table(is.na(ALL.DF@meta.data$ClusterNames))
+ALL.DF@meta.data$ClusterNames = factor(ALL.DF@meta.data$ClusterNames,
+                                       levels = c("EC","PC_SMC","FB","MüG","MP_MG", "MC","NP","T_NK","B","Plasma"))
+unique(ALL.DF@meta.data$ClusterNames)
+levels(ALL.DF@meta.data$ClusterNames)
+
+```
+
+##### Save the R object! #####
+```{r}
+saveRDS(ALL.DF, file = paste0(Rfilespath, "/", dataset.name, "rds"))
+```
+
